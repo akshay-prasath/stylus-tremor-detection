@@ -578,9 +578,11 @@ export default function TremorStylusPage() {
     drawCharts();
   }, [redrawAll, drawCharts]);
 
-  const VERDICT_HOLD_MS = 2000;
+  const VERDICT_HOLD_MS = 1200;
   const lastVerdictChangeRef = useRef(0);
   const [displayedVerdict, setDisplayedVerdict] = useState("idle, awaiting stylus input");
+  const isTremorVerdict = (v: string) =>
+    v.startsWith("tremor detected") || v.startsWith("high-frequency");
 
   const verdict = useMemo(() => {
     if (metrics.sampleRate === 0) return "idle, awaiting stylus input";
@@ -604,8 +606,11 @@ export default function TremorStylusPage() {
 
   useEffect(() => {
     if (verdict === displayedVerdict) return;
+    // Only the tremor-class verdicts are latched (so brief bursts stay readable).
+    // Every other transition is immediate, keeping the feel real time.
+    const minHold = isTremorVerdict(displayedVerdict) ? VERDICT_HOLD_MS : 0;
     const elapsed = performance.now() - lastVerdictChangeRef.current;
-    if (elapsed >= VERDICT_HOLD_MS) {
+    if (elapsed >= minHold) {
       setDisplayedVerdict(verdict);
       lastVerdictChangeRef.current = performance.now();
       return;
@@ -613,13 +618,13 @@ export default function TremorStylusPage() {
     const id = window.setTimeout(() => {
       setDisplayedVerdict(verdict);
       lastVerdictChangeRef.current = performance.now();
-    }, VERDICT_HOLD_MS - elapsed);
+    }, minHold - elapsed);
     return () => window.clearTimeout(id);
   }, [verdict, displayedVerdict]);
 
   return (
     <main className="flex-1 flex flex-col lg:flex-row h-screen w-screen overflow-hidden">
-      <section className="flex-1 relative flex flex-col">
+      <section className="flex-1 min-h-0 relative flex flex-col">
         <header className="px-5 py-3 border-b border-white/10 flex items-center gap-3 flex-wrap">
           <div className="flex flex-col">
             <h1 className="text-sm font-semibold tracking-tight">
@@ -692,16 +697,15 @@ export default function TremorStylusPage() {
         </div>
       </section>
 
-      <aside className="w-full lg:w-[460px] border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col overflow-y-auto">
+      <aside className="w-full lg:w-[460px] h-[42vh] lg:h-auto shrink-0 lg:shrink border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col overflow-y-auto">
         <div className="p-4 border-b border-white/10">
           <div className="text-[11px] uppercase tracking-wider text-white/40 font-mono">
             verdict
           </div>
           <div
-            className={`mt-1 text-sm font-medium ${
-              metrics.inTremorBand || metrics.bandEnergyRatio > 0.25
-                ? "text-amber-300"
-                : "text-white/85"
+            key={displayedVerdict}
+            className={`mt-1 text-sm font-medium verdict-anim ${
+              isTremorVerdict(displayedVerdict) ? "text-amber-300" : "text-white/85"
             }`}
           >
             {displayedVerdict}
