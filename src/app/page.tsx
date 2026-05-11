@@ -100,6 +100,34 @@ function emptyMetrics(): LiveMetrics {
 const STABILISE_MS = 600;
 const STABILISE_MIN_SAMPLES = 50;
 
+type StrokeOpts = {
+  penColor: string;
+  rawColor: string;
+  size: number;
+  pressureSize: boolean;
+};
+
+type CompletedStroke = StrokeOpts & {
+  samples: SamplePoint[];
+};
+
+function paperIsLight(hex: string): boolean {
+  const m = hex.match(/^#?([0-9a-f]{6})$/i);
+  if (!m) return false;
+  const v = parseInt(m[1], 16);
+  const r = (v >> 16) & 0xff;
+  const g = (v >> 8) & 0xff;
+  const b = v & 0xff;
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.55;
+}
+
+function widthFor(sample: SamplePoint, opts: StrokeOpts, rawScale = 1): number {
+  const base = opts.size * rawScale;
+  if (!opts.pressureSize) return base;
+  const p = Math.max(0, Math.min(1, sample.pressure));
+  return base * (0.35 + 0.65 * (p > 0 ? p : 0.5));
+}
+
 export default function TremorStylusPage() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const chartRef = useRef<HTMLCanvasElement | null>(null);
@@ -123,6 +151,37 @@ export default function TremorStylusPage() {
   const [isDrawing, setIsDrawing] = useState(false);
   const [strokes, setStrokes] = useState<number>(0);
 
+  // Artist controls.
+  const [penColor, setPenColor] = useState("#60a5fa"); // blue-400
+  const [rawColor, setRawColor] = useState("#f87171"); // red-400
+  const [paperColor, setPaperColor] = useState("#0a0a0a"); // canvas bg
+  const [penSize, setPenSize] = useState(3);
+  const [pressureSize, setPressureSize] = useState(true);
+
+  const penColorRef = useRef(penColor);
+  const rawColorRef = useRef(rawColor);
+  const penSizeRef = useRef(penSize);
+  const pressureSizeRef = useRef(pressureSize);
+  useEffect(() => {
+    penColorRef.current = penColor;
+  }, [penColor]);
+  useEffect(() => {
+    rawColorRef.current = rawColor;
+  }, [rawColor]);
+  useEffect(() => {
+    penSizeRef.current = penSize;
+  }, [penSize]);
+  useEffect(() => {
+    pressureSizeRef.current = pressureSize;
+  }, [pressureSize]);
+
+  const pastStrokesRef = useRef<CompletedStroke[]>([]);
+  const strokeOptsRef = useRef<StrokeOpts | null>(null);
+  const isDrawingRef = useRef(false);
+  useEffect(() => {
+    isDrawingRef.current = isDrawing;
+  }, [isDrawing]);
+
   const alphaRef = useRef(alpha);
   const pidGainsRef = useRef(pidGains);
   const showRefRef = useRef(showReference);
@@ -142,10 +201,15 @@ export default function TremorStylusPage() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const rect = canvas.getBoundingClientRect();
-    ctx.clearRect(0, 0, rect.width, rect.height);
 
+    // Paper fill.
+    ctx.fillStyle = paperColor;
+    ctx.fillRect(0, 0, rect.width, rect.height);
+
+    // Grid adapts to paper luminance.
+    const light = paperIsLight(paperColor);
     ctx.save();
-    ctx.strokeStyle = "rgba(255,255,255,0.04)";
+    ctx.strokeStyle = light ? "rgba(0,0,0,0.07)" : "rgba(255,255,255,0.04)";
     ctx.lineWidth = 1;
     const step = 40;
     for (let x = 0; x <= rect.width; x += step) {
@@ -165,7 +229,7 @@ export default function TremorStylusPage() {
     if (showReference) {
       referenceYRef.current = rect.height / 2;
       ctx.save();
-      ctx.strokeStyle = "rgba(250,204,21,0.55)";
+      ctx.strokeStyle = light ? "rgba(180,120,0,0.7)" : "rgba(250,204,21,0.55)";
       ctx.setLineDash([8, 6]);
       ctx.lineWidth = 1.2;
       ctx.beginPath();
@@ -173,14 +237,28 @@ export default function TremorStylusPage() {
       ctx.lineTo(rect.width - 20, referenceYRef.current);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = "rgba(250,204,21,0.7)";
+      ctx.fillStyle = light ? "rgba(120,80,0,0.85)" : "rgba(250,204,21,0.7)";
       ctx.font = "10px var(--font-geist-mono), monospace";
-      ctx.fillText("reference line: draw along this to measure deviation", 24, referenceYRef.current - 6);
+      ctx.fillText(
+        "reference line: draw along this to measure deviation",
+        24,
+        referenceYRef.current - 6,
+      );
       ctx.restore();
     }
 
-    drawSamples(ctx, samplesRef.current, showRaw, showCompensated);
-  }, [showRaw, showCompensated, showReference]);
+    for (const stroke of pastStrokesRef.current) {
+      drawStroke(ctx, stroke, showRaw, showCompensated);
+    }
+    if (isDrawingRef.current && strokeOptsRef.current) {
+      drawStroke(
+        ctx,
+        { ...strokeOptsRef.current, samples: samplesRef.current },
+        showRaw,
+        showCompensated,
+      );
+    }
+  }, [showRaw, showCompensated, showReference, paperColor]);
 
   useEffect(() => {
     const sync = () => {
@@ -470,6 +548,12 @@ export default function TremorStylusPage() {
       lastFilteredRef.current = null;
       pidRef.current = emptyPid();
       metricsPointerTypeRef.current = e.pointerType || "--";
+      strokeOptsRef.current = {
+        penColor: penColorRef.current,
+        rawColor: rawColorRef.current,
+        size: penSizeRef.current,
+        pressureSize: pressureSizeRef.current,
+      };
       setIsDrawing(true);
     },
     [],
@@ -530,20 +614,23 @@ export default function TremorStylusPage() {
       if (n < 2) return;
       const a0 = samplesRef.current[n - 2];
       const b0 = samplesRef.current[n - 1];
+      const opts = strokeOptsRef.current;
+      if (!opts) return;
+      ctx.lineCap = "round";
 
       if (showRaw) {
-        ctx.strokeStyle = "rgba(248,113,113,0.55)";
-        ctx.lineWidth = 1.2;
-        ctx.lineCap = "round";
+        ctx.strokeStyle = opts.rawColor;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = widthFor(b0, opts, 0.55);
         ctx.beginPath();
         ctx.moveTo(a0.x, a0.y);
         ctx.lineTo(b0.x, b0.y);
         ctx.stroke();
+        ctx.globalAlpha = 1;
       }
       if (showCompensated) {
-        ctx.strokeStyle = "rgba(96,165,250,0.95)";
-        ctx.lineWidth = 2.2;
-        ctx.lineCap = "round";
+        ctx.strokeStyle = opts.penColor;
+        ctx.lineWidth = widthFor(b0, opts, 1);
         ctx.beginPath();
         ctx.moveTo(a0.fx, a0.fy);
         ctx.lineTo(b0.fx, b0.fy);
@@ -575,19 +662,25 @@ export default function TremorStylusPage() {
       // ignore
     }
     activePointerRef.current = null;
+    if (samplesRef.current.length > 1 && strokeOptsRef.current) {
+      pastStrokesRef.current.push({
+        ...strokeOptsRef.current,
+        samples: samplesRef.current.slice(),
+      });
+      setStrokes((s) => s + 1);
+    }
     setIsDrawing(false);
-    setStrokes((s) => s + 1);
   }, []);
 
   const exportCanvas = useCallback(
-    (canvas: HTMLCanvasElement | null, name: string) => {
+    (canvas: HTMLCanvasElement | null, name: string, bg = "#0a0a0a") => {
       if (!canvas) return;
       const temp = document.createElement("canvas");
       temp.width = canvas.width;
       temp.height = canvas.height;
       const ctx = temp.getContext("2d");
       if (!ctx) return;
-      ctx.fillStyle = "#0a0a0a";
+      ctx.fillStyle = bg;
       ctx.fillRect(0, 0, temp.width, temp.height);
       ctx.drawImage(canvas, 0, 0);
       temp.toBlob((blob) => {
@@ -609,9 +702,22 @@ export default function TremorStylusPage() {
 
   const handleClear = useCallback(() => {
     samplesRef.current = [];
+    pastStrokesRef.current = [];
     lastFilteredRef.current = null;
     pidRef.current = emptyPid();
+    strokeOptsRef.current = null;
     setStrokes(0);
+    setMetrics(emptyMetrics());
+    redrawAll();
+    drawCharts();
+  }, [redrawAll, drawCharts]);
+
+  const handleUndo = useCallback(() => {
+    if (pastStrokesRef.current.length === 0) return;
+    pastStrokesRef.current.pop();
+    samplesRef.current = [];
+    lastFilteredRef.current = null;
+    setStrokes((s) => Math.max(0, s - 1));
     setMetrics(emptyMetrics());
     redrawAll();
     drawCharts();
@@ -709,8 +815,17 @@ export default function TremorStylusPage() {
               ref line
             </button>
             <button
-              onClick={() => exportCanvas(canvasRef.current, `stroke-${ts()}.png`)}
-              title="Save the current stroke canvas (raw + compensated traces, with the dark background) as a PNG."
+              onClick={handleUndo}
+              title="Remove the most recent completed stroke."
+              className="px-2.5 py-1 rounded-md border border-white/10 text-white/70 hover:bg-white/5"
+            >
+              undo
+            </button>
+            <button
+              onClick={() =>
+                exportCanvas(canvasRef.current, `stroke-${ts()}.png`, paperColor)
+              }
+              title="Save the current canvas (all strokes, current paper color) as a PNG."
               className="px-2.5 py-1 rounded-md border border-white/10 text-white/70 hover:bg-white/5"
             >
               save PNG
@@ -757,6 +872,58 @@ export default function TremorStylusPage() {
           >
             {displayedVerdict}
           </div>
+        </div>
+
+        <div className="p-4 border-b border-white/10 space-y-3">
+          <div className="text-[11px] uppercase tracking-wider text-white/40 font-mono flex items-center">
+            artist controls
+            <HelpTip text="Stroke color, paper color, line thickness, and pressure-driven thickness. Each completed stroke remembers its own settings, so changing the color after drawing won't repaint old strokes. Use 'undo' in the header to remove the last stroke." />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <ColorField
+              label="pen color"
+              value={penColor}
+              onChange={setPenColor}
+              tip="Color of the compensated (smoothed) stroke. This is the line the artist actually sees once tremor is removed."
+            />
+            <ColorField
+              label="raw color"
+              value={rawColor}
+              onChange={setRawColor}
+              tip="Color of the underlying raw stylus path. Drawn at 55% opacity so it sits behind the compensated stroke."
+            />
+            <ColorField
+              label="paper"
+              value={paperColor}
+              onChange={setPaperColor}
+              tip="Canvas background color. The grid and reference line invert automatically for light papers, and the saved PNG uses this color too."
+            />
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase tracking-wider text-white/40 font-mono flex items-center">
+                pressure size
+                <HelpTip text="When on, line thickness scales with stylus pressure (Apple Pencil). When off, every segment is drawn at a constant width." />
+              </span>
+              <label className="mt-1 inline-flex items-center gap-2 text-[11px] font-mono">
+                <input
+                  type="checkbox"
+                  checked={pressureSize}
+                  onChange={(e) => setPressureSize(e.target.checked)}
+                  className="accent-blue-400"
+                />
+                <span className="text-white/80">{pressureSize ? "on" : "off"}</span>
+              </label>
+            </div>
+          </div>
+          <SliderField
+            label="pen size"
+            value={penSize}
+            min={0.5}
+            max={12}
+            step={0.1}
+            onChange={setPenSize}
+            accent="accent-blue-400"
+            tip="Maximum line thickness in pixels for the compensated stroke. Raw is drawn at about 55 percent of this width. With pressure-size on, the value here is the upper bound."
+          />
         </div>
 
         <div className="p-4 grid grid-cols-2 gap-3 border-b border-white/10">
@@ -926,30 +1093,37 @@ export default function TremorStylusPage() {
   );
 }
 
-function drawSamples(
+function drawStroke(
   ctx: CanvasRenderingContext2D,
-  samples: SamplePoint[],
+  stroke: CompletedStroke,
   showRaw: boolean,
   showCompensated: boolean,
 ) {
-  if (samples.length < 2) return;
+  const s = stroke.samples;
+  if (s.length < 2) return;
+  ctx.lineCap = "round";
+
   if (showRaw) {
-    ctx.strokeStyle = "rgba(248,113,113,0.55)";
-    ctx.lineWidth = 1.2;
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(samples[0].x, samples[0].y);
-    for (let i = 1; i < samples.length; i++) ctx.lineTo(samples[i].x, samples[i].y);
-    ctx.stroke();
+    ctx.strokeStyle = stroke.rawColor;
+    ctx.globalAlpha = 0.55;
+    for (let i = 1; i < s.length; i++) {
+      ctx.lineWidth = widthFor(s[i], stroke, 0.55);
+      ctx.beginPath();
+      ctx.moveTo(s[i - 1].x, s[i - 1].y);
+      ctx.lineTo(s[i].x, s[i].y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
   }
   if (showCompensated) {
-    ctx.strokeStyle = "rgba(96,165,250,0.95)";
-    ctx.lineWidth = 2.2;
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(samples[0].fx, samples[0].fy);
-    for (let i = 1; i < samples.length; i++) ctx.lineTo(samples[i].fx, samples[i].fy);
-    ctx.stroke();
+    ctx.strokeStyle = stroke.penColor;
+    for (let i = 1; i < s.length; i++) {
+      ctx.lineWidth = widthFor(s[i], stroke, 1);
+      ctx.beginPath();
+      ctx.moveTo(s[i - 1].fx, s[i - 1].fy);
+      ctx.lineTo(s[i].fx, s[i].fy);
+      ctx.stroke();
+    }
   }
 }
 
@@ -1271,6 +1445,37 @@ function SmoothnessTable({
           enable ref line to add deviation-from-reference RMSE
         </p>
       )}
+    </div>
+  );
+}
+
+function ColorField({
+  label,
+  value,
+  onChange,
+  tip,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  tip?: string;
+}) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-[10px] uppercase tracking-wider text-white/40 font-mono flex items-center">
+        {label}
+        {tip && <HelpTip text={tip} />}
+      </span>
+      <div className="mt-1 inline-flex items-center gap-2">
+        <input
+          type="color"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={label}
+          className="w-8 h-8 rounded border border-white/20 bg-transparent cursor-pointer p-0"
+        />
+        <span className="text-[11px] font-mono text-white/70 uppercase">{value}</span>
+      </div>
     </div>
   );
 }
