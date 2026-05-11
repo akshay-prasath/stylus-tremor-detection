@@ -579,6 +579,34 @@ export default function TremorStylusPage() {
     setStrokes((s) => s + 1);
   }, []);
 
+  const exportCanvas = useCallback(
+    (canvas: HTMLCanvasElement | null, name: string) => {
+      if (!canvas) return;
+      const temp = document.createElement("canvas");
+      temp.width = canvas.width;
+      temp.height = canvas.height;
+      const ctx = temp.getContext("2d");
+      if (!ctx) return;
+      ctx.fillStyle = "#0a0a0a";
+      ctx.fillRect(0, 0, temp.width, temp.height);
+      ctx.drawImage(canvas, 0, 0);
+      temp.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+      }, "image/png");
+    },
+    [],
+  );
+
+  const ts = () => new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+
   const handleClear = useCallback(() => {
     samplesRef.current = [];
     lastFilteredRef.current = null;
@@ -681,6 +709,13 @@ export default function TremorStylusPage() {
               ref line
             </button>
             <button
+              onClick={() => exportCanvas(canvasRef.current, `stroke-${ts()}.png`)}
+              title="Save the current stroke canvas (raw + compensated traces, with the dark background) as a PNG."
+              className="px-2.5 py-1 rounded-md border border-white/10 text-white/70 hover:bg-white/5"
+            >
+              save PNG
+            </button>
+            <button
               onClick={handleClear}
               title="Wipe the canvas, sample buffer, and PID state. Strokes counter resets to zero."
               className="px-2.5 py-1 rounded-md border border-white/10 text-white/70 hover:bg-white/5"
@@ -778,12 +813,21 @@ export default function TremorStylusPage() {
         />
 
         <div className="p-4 border-b border-white/10">
-          <div className="flex items-baseline justify-between mb-2">
+          <div className="flex items-baseline justify-between mb-2 gap-2">
             <div className="text-[11px] uppercase tracking-wider text-white/40 font-mono">
               residual spectrum (FFT)
             </div>
-            <div className="text-[10px] font-mono text-white/40">
-              <span className="text-amber-300">●</span> tremor band
+            <div className="text-[10px] font-mono text-white/40 flex items-center gap-2">
+              <span>
+                <span className="text-amber-300">●</span> tremor band
+              </span>
+              <button
+                onClick={() => exportCanvas(fftRef.current, `fft-${ts()}.png`)}
+                title="Save the FFT residual-spectrum panel as a PNG."
+                className="px-1.5 py-0.5 rounded border border-white/10 text-white/60 hover:bg-white/5"
+              >
+                save
+              </button>
             </div>
           </div>
           <canvas
@@ -795,14 +839,23 @@ export default function TremorStylusPage() {
         <SmoothnessTable metrics={metrics} showReference={showReference} />
 
         <div className="p-4 border-b border-white/10">
-          <div className="flex items-baseline justify-between mb-2">
+          <div className="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
             <div className="text-[11px] uppercase tracking-wider text-white/40 font-mono">
               residual, servo & pressure (last 3 s)
             </div>
-            <div className="text-[10px] font-mono text-white/40">
-              <span className="text-pink-300">●</span> residual{" "}
-              <span className="text-green-300 ml-2">●</span> servo{" "}
-              <span className="text-sky-300 ml-2">●</span> pressure
+            <div className="text-[10px] font-mono text-white/40 flex items-center gap-2 flex-wrap">
+              <span>
+                <span className="text-pink-300">●</span> residual{" "}
+                <span className="text-green-300 ml-2">●</span> servo{" "}
+                <span className="text-sky-300 ml-2">●</span> pressure
+              </span>
+              <button
+                onClick={() => exportCanvas(chartRef.current, `chart-${ts()}.png`)}
+                title="Save the time-series chart panel as a PNG."
+                className="px-1.5 py-0.5 rounded border border-white/10 text-white/60 hover:bg-white/5"
+              >
+                save
+              </button>
             </div>
           </div>
           <canvas
