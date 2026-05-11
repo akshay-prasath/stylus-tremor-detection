@@ -58,7 +58,8 @@ type LiveMetrics = {
   pidIntegral: number;
   pidDerivative: number;
   servoAngle: number;
-  bandEnergyRatio: number; // fraction of spectral energy in 8-12 Hz band
+  bandEnergyRatio: number;
+  stable: boolean; // false during the EMA warmup transient
 };
 
 const EMA_ALPHA_DEFAULT = 0.18;
@@ -92,8 +93,12 @@ function emptyMetrics(): LiveMetrics {
     pidDerivative: 0,
     servoAngle: 0,
     bandEnergyRatio: 0,
+    stable: false,
   };
 }
+
+const STABILISE_MS = 600;
+const STABILISE_MIN_SAMPLES = 50;
 
 export default function TremorStylusPage() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -212,6 +217,10 @@ export default function TremorStylusPage() {
 
     const dur = window[window.length - 1].t - window[0].t;
     const sampleRate = dur > 0 ? ((window.length - 1) * 1000) / dur : 0;
+    // Filter warmup: residuals are large for the first ~15 samples and the FFT
+    // is unreliable below ~50 samples, so gate tremor verdicts on stroke age.
+    const strokeAge = window[window.length - 1].t;
+    const stable = strokeAge >= STABILISE_MS && window.length >= STABILISE_MIN_SAMPLES;
 
     let sumSq = 0;
     let peak = 0;
@@ -272,10 +281,12 @@ export default function TremorStylusPage() {
       tiltY: last.tiltY,
       pointerType: metricsPointerTypeRef.current,
       inTremorBand:
-        (estimatedFrequency >= TREMOR_BAND[0] &&
+        stable &&
+        ((estimatedFrequency >= TREMOR_BAND[0] &&
           estimatedFrequency <= TREMOR_BAND[1] &&
           tremorAmplitude > 0.4) ||
-        (bandEnergyRatio > 0.18 && tremorAmplitude > 0.4),
+          (bandEnergyRatio > 0.18 && tremorAmplitude > 0.4)),
+      stable,
       rawJerk,
       filteredJerk,
       rawCurv,
@@ -586,6 +597,7 @@ export default function TremorStylusPage() {
 
   const verdict = useMemo(() => {
     if (metrics.sampleRate === 0) return "idle, awaiting stylus input";
+    if (!metrics.stable) return "stabilising filter, hold for a moment";
     const amp = metrics.tremorAmplitude;
     const ratio = metrics.bandEnergyRatio;
     const inBand =
@@ -921,9 +933,24 @@ const HELPTIP_EVENT = "helptip:opened";
 function HelpTip({ text }: { text: string }) {
   const id = useId();
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(
+    null,
+  );
   const btnRef = useRef<HTMLButtonElement | null>(null);
-  const POPOVER_W = 260;
+  const POPOVER_MAX_W = 260;
+  const POPOVER_MAX_H = 180;
+
+  const computePos = useCallback(() => {
+    if (!btnRef.current) return null;
+    const r = btnRef.current.getBoundingClientRect();
+    const width = Math.min(POPOVER_MAX_W, Math.max(160, window.innerWidth - 16));
+    const left = Math.max(8, Math.min(window.innerWidth - width - 8, r.right - width));
+    let top = r.bottom + 6;
+    if (top + POPOVER_MAX_H > window.innerHeight - 8) {
+      top = Math.max(8, r.top - 6 - POPOVER_MAX_H);
+    }
+    return { left, top, width };
+  }, []);
 
   // Close on outside pointer-down.
   useEffect(() => {
@@ -952,15 +979,23 @@ function HelpTip({ text }: { text: string }) {
     return () => window.removeEventListener(HELPTIP_EVENT, onOpened);
   }, [id]);
 
+  // Close the tip on scroll or resize, since a fixed-position popover would
+  // otherwise float away from its trigger.
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open]);
+
   const toggle = () => {
-    if (!open && btnRef.current) {
-      const r = btnRef.current.getBoundingClientRect();
-      const left = Math.max(
-        8,
-        Math.min(window.innerWidth - POPOVER_W - 8, r.right - POPOVER_W),
-      );
-      const top = r.bottom + 6;
-      setPos({ left, top });
+    if (!open) {
+      const p = computePos();
+      if (p) setPos(p);
       window.dispatchEvent(new CustomEvent(HELPTIP_EVENT, { detail: id }));
     }
     setOpen((o) => !o);
@@ -983,8 +1018,13 @@ function HelpTip({ text }: { text: string }) {
       </button>
       {open && pos && (
         <span
-          className="fixed z-50 p-2 rounded-md bg-neutral-900 border border-white/20 text-[11px] text-white/85 leading-snug shadow-xl normal-case tracking-normal font-sans whitespace-normal"
-          style={{ left: pos.left, top: pos.top, width: POPOVER_W }}
+          className="fixed z-50 p-2 rounded-md bg-neutral-900 border border-white/20 text-[11px] text-white/85 leading-snug shadow-xl normal-case tracking-normal font-sans whitespace-normal overflow-y-auto block"
+          style={{
+            left: pos.left,
+            top: pos.top,
+            width: pos.width,
+            maxHeight: POPOVER_MAX_H,
+          }}
           data-helptip-popover
         >
           {text}
